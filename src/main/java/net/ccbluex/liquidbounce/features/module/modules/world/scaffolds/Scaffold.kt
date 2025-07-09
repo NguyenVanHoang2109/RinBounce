@@ -69,7 +69,7 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
     // -->
 
     val scaffoldMode by choices(
-        "ScaffoldMode", arrayOf("Normal", "Rewinside", "Expand", "Telly", "GodBridge"), "Normal"
+        "ScaffoldMode", arrayOf("Normal", "Rewinside", "Expand", "Telly", "GodBridge", "Breezily"), "Normal"
     )
 
     // Expand
@@ -110,12 +110,21 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
         scaffoldMode == "Telly"
     }
 
+    // Breezily mode sub-values
+    private val breezilyTiming by floatRange("BreezilyTiming", 0.1f..0.15f, 0.05f..0.3f) { scaffoldMode == "Breezily" }
+    private val breezilyStrafe by float("BreezilyStrafe", 0.2f, 0.1f..0.5f) { scaffoldMode == "Breezily" }
+    private val breezilyStabilize by boolean("BreezilyStabilize", true) { scaffoldMode == "Breezily" }
+    private val breezilyPitch by float("BreezilyPitch", 82.5f, 75f..85f) { scaffoldMode == "Breezily" }
+
     // GodBridge mode sub-values
     private val waitForRots by boolean("WaitForRotations", false) { isGodBridgeEnabled }
     private val useOptimizedPitch by boolean("UseOptimizedPitch", false) { isGodBridgeEnabled }
+    private val dynamicPitch by boolean("DynamicPitch", false) { isGodBridgeEnabled }
     private val customGodPitch by float(
         "GodBridgePitch", 73.5f, 0f..90f
     ) { isGodBridgeEnabled && !useOptimizedPitch }
+    private val stabilizeSpeed by boolean("StabilizeSpeed", true) { isGodBridgeEnabled }
+    private val autoAdjust by boolean("AutoAdjust", true) { isGodBridgeEnabled }
 
     val jumpAutomatically by boolean("JumpAutomatically", true) { scaffoldMode == "GodBridge" }
     private val blocksToJumpRange by intRange("BlocksToJumpRange", 4..4, 1..8) {  scaffoldMode == "GodBridge" && !jumpAutomatically }
@@ -256,7 +265,12 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
     private val isGodBridgeEnabled
         get() = scaffoldMode == "GodBridge" || scaffoldMode == "Normal" && options.rotationMode == "GodBridge"
 
+    private val isBreezilyEnabled
+        get() = scaffoldMode == "Breezily"
+
     private var godBridgeTargetRotation: Rotation? = null
+    private var breezilyRotation: Rotation? = null
+    private var lastBreezilySwitch: Long = 0
 
     private val isLookingDiagonally: Boolean
         get() {
@@ -300,6 +314,25 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
         if (mc.playerController.currentGameType == WorldSettings.GameType.SPECTATOR) return@loopSequence
 
         mc.timer.timerSpeed = timer
+
+        // Breezily mode logic
+        if (isBreezilyEnabled && player.onGround) {
+            // Switch rotations based on timing
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastBreezilySwitch > (breezilyTiming.random() * 1000)) {
+                val baseYaw = MovementUtils.direction.toDegreesF()
+                val side = if ((currentTime / 100) % 2 == 0L) breezilyStrafe else -breezilyStrafe
+                val rotation = Rotation(baseYaw + side, breezilyPitch).fixedSensitivity()
+                
+                if (breezilyStabilize) {
+                    player.motionX *= 0.7
+                    player.motionZ *= 0.7
+                }
+
+                breezilyRotation = rotation
+                lastBreezilySwitch = currentTime
+            }
+        }
 
         // Telly
         if (player.onGround) ticksUntilJump++
@@ -465,7 +498,11 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
 
         if (!Tower.isTowering && isGodBridgeEnabled && options.rotationsActive) {
             generateGodBridgeRotations(ticks)
+            return@handler
+        }
 
+        if (isBreezilyEnabled && options.rotationsActive) {
+            breezilyRotation?.let { setRotation(it, ticks) }
             return@handler
         }
 
@@ -1214,9 +1251,8 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
         if (!player.isMoving) {
             placeRotation?.run {
                 val axisMovement = floor(this.rotation.yaw / 90) * 90
-
                 val yaw = axisMovement + 45f
-                val pitch = 75f
+                val pitch = calculateOptimalPitch()
 
                 setRotation(Rotation(yaw, pitch), ticks)
                 return
@@ -1231,8 +1267,8 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
                     player.posZ + sin(movingYaw.toRadians()) * 0.5
                 ) != floor(player.posZ)
 
-                val posInDirection =
-                    BlockPos(player.positionVector.offset(EnumFacing.fromAngle(movingYaw.toDouble()), 0.6))
+                val posInDirection = 
+                    BlockPos(player.positionVector.offset(EnumFacing.fromAngle(movingYaw.toDouble()), if(autoAdjust) 0.7 else 0.6))
 
                 val isLeaningOffBlock = player.position.down().block == air
                 val nextBlockIsAir = posInDirection.down().block == air
@@ -1246,14 +1282,52 @@ object Scaffold : Module("Scaffold", Category.WORLD, Keyboard.KEY_I) {
                 if (isOnRightSide) 45f else -45f
             } else 0f
 
-            Rotation(movingYaw + side, if (useOptimizedPitch) 73.5f else customGodPitch)
+            val pitch = calculateOptimalPitch()
+            
+            Rotation(movingYaw + side, pitch)
         } else {
-            Rotation(movingYaw, 75.6f)
+            val pitch = if (dynamicPitch) 75.6f + (if(player.fallDistance > 0) player.fallDistance * 0.5f else 0f) else 75.6f
+            Rotation(movingYaw, pitch)
         }.fixedSensitivity()
 
-        godBridgeTargetRotation = rotation
+        if (stabilizeSpeed && player.onGround) {
+            val currentSpeed = sqrt(player.motionX * player.motionX + player.motionZ * player.motionZ)
+            if (currentSpeed > 0.12) {
+                player.motionX *= 0.9
+                player.motionZ *= 0.9
+            }
+        }
 
+        godBridgeTargetRotation = rotation
         setRotation(rotation, ticks)
+    }
+
+    private fun calculateOptimalPitch(): Float {
+        val player = mc.thePlayer ?: return if (useOptimizedPitch) 73.5f else customGodPitch
+
+        return when {
+            useOptimizedPitch -> {
+                // Calculate optimal pitch based on player's state
+                val basePitch = 73.5f
+                when {
+                    player.fallDistance > 0 -> basePitch + (player.fallDistance * 0.6f).coerceAtMost(8f) 
+                    player.motionY < -0.1 -> basePitch + 2f
+                    player.isSprinting -> basePitch - 0.5f
+                    else -> basePitch
+                }
+            }
+            dynamicPitch -> {
+                // Dynamic pitch adjustment based on player's motion
+                val targetPitch = customGodPitch + when {
+                    player.fallDistance > 0 -> player.fallDistance * 0.8f
+                    player.motionY < -0.1 -> 2f
+                    player.isSprinting -> -0.5f
+                    else -> 0f
+                }
+                targetPitch.coerceIn(65f, 85f)
+            }
+            else -> customGodPitch
+        }
     }
 
     override val tag
