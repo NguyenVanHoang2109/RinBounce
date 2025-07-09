@@ -97,20 +97,3 @@ jobs:
             echo "Artifacts directory is empty!"
             exit 1
           fi
-
-      - name: Create GitHub Release
-        id: create_release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.build.outputs.lb_version }}
-        run: |
-          # Tạo tag và release
-          TAG_NAME="v$VERSION-${{ github.run_number }}"
-          gh release create $TAG_NAME \
-            --title "Build $VERSION (Run #${{ github.run_number }})" \
-            --notes "Automated build by GitHub Actions" \
-            ./artifacts/*.jar
-          
-          # Lấy URL release
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME"
-          echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
